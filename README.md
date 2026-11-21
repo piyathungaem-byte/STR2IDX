@@ -116,6 +116,47 @@ flickering sub-second cues), `--max-lines`, `--margin-bottom`, `--shadow`,
    lowercase-and-uppercase consistent with what the TV already handles.
 4. **USB, not NAS.** Several TVs only index sidecar subtitles from USB storage.
 
+## Browser interface
+
+Everything above is also a web UI — same options, plus drag-and-drop, a live
+render of your settings, and downloads.
+
+```bash
+python3 webapp.py                      # http://127.0.0.1:8420
+python3 webapp.py --port 8080 --host 0.0.0.0 --max-upload-mb 8192
+```
+
+What it does:
+
+* **the whole settings table as controls** — canvas, margins, font, size,
+  outline, shadow, bold, line spacing, capitals, both colours, fps, delay,
+  minimum duration, engine, `force_style`, language, title, mux, self-check,
+  previews. The form is *generated* from `srt2idx/settings.py:FIELDS`, the same
+  table that builds the CLI flags, so it cannot drift behind the terminal.
+* **a live command readout** — the panel under the form shows the exact
+  `srt2idx ...` line your settings correspond to. It is produced by the same
+  serialiser, so what you see is what the CLI would run.
+* **Live look** — type one cue, and it is rendered through the chosen engine
+  and quantised the way a real conversion is, so font choice, outline and
+  colours are visible before you commit to a 2-hour film.
+* **batch** — drop several `.srt` files, click rows to include or skip them;
+  one job converts each.
+* **uploads stay on disk, you keep the files** — `.idx`, `.sub`, the muxed
+  `.mkv`, the previews, or a `.zip` of all of it. Nothing is sent anywhere.
+* **rename/delete/rename** for sidecar matching, and a video probe that reads
+  the frame size and suggests `pal` or `ntsc` from it.
+* **self-check by default** — every job decodes its own output and compares
+  pixels; a red result means the file would have failed on the TV.
+
+Routes are a small JSON API if you would rather script it than click it:
+`GET /api/config` (the schema), `POST /api/upload?name=&kind=`,
+`POST /api/jobs`, `GET /api/jobs/<id>`, `GET /api/jobs/<id>/file?name=`,
+`/preview`, `/text`, `/bundle`, `POST /api/sample`, `POST /api/probe`.
+
+Local tool by design: writes only inside `--workdir` (default `./webdata`),
+accepts only bare filenames from there, binds to `127.0.0.1` unless you pass
+`--host 0.0.0.0`.
+
 ## Limitations (the honest list)
 
 * **No restyling.** Size, colour and font are decided at conversion time. There

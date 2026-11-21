@@ -24,7 +24,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from srt2idx.cli import _ffmpeg_exe
+from srt2idx.pipeline import ffmpeg_exe as _ffmpeg_exe
 from srt2idx.decode import decode_spu
 from srt2idx.render import PAL_SIZE, RenderStyle, Renderer
 from srt2idx.srt import parse
