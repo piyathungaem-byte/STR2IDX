@@ -12,7 +12,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .render import NTSC_SIZE, PAL_SIZE, RenderStyle, Renderer
+from .render import (NTSC_SIZE, PAL_SIZE, RenderStyle, Renderer, can_shape,
+                      suggest_font)
 from .srt import needs_shaping, parse
 from .settings import Options, UsageError
 from .spu import build_spu
@@ -51,6 +52,7 @@ class Report:
     options: Options
     canvas: tuple[int, int] = PAL_SIZE
     engine: str = "pil"
+    shaping: str = "n/a"       # libass+harfbuzz | NONE | n/a (no shaping needed)
     cues: int = 0
     encoded: int = 0
     skipped: int = 0
@@ -89,6 +91,59 @@ def _asdict(r: Report) -> dict:
 
 
 # --------------------------------------------------------------------- steps
+def _advice(engine: str, font: str | None, text: str,
+            allowed: bool = False) -> str:
+    """What to change, based on which of the two causes it is."""
+    bits = []
+    if engine != "ass":
+        bits.append("engine 'ass' (libass) shapes; Pillow cannot. auto picks "
+                    "it whenever ffmpeg is found"
+                    + ("" if ffmpeg_exe() else
+                       ", and no ffmpeg was found here -- run "
+                       'pip install ".[ass]" or put ffmpeg.exe on PATH'))
+    if font and not can_shape(font):
+        from .srt import scripts_in
+        script = " / ".join(scripts_in(text)) or "this"
+        alt, _s = suggest_font(text)
+        bits.append(f"clear the font setting to use {os.path.basename(alt)}"
+                    if alt and os.path.abspath(alt) != os.path.abspath(font)
+                    else f"install a font with OpenType {script} tables "
+                         f"(Noto Sans {script}, or Nirmala UI on Windows)")
+    if not allowed:          # pointless once they have asked for it
+        bits.append("--allow-unshaped writes the file anyway")
+    return "; ".join(bits)
+
+
+def shaping_status(engine: str, font: str | None, text: str,
+                   allowed: bool = False) -> tuple[bool, str]:
+    """-> (will this be shaped?, what to do about it).
+
+    Two different failures look identical on a TV -- a real Sinhala glyph with
+    its vowel sign floating one space to the right -- and need opposite fixes,
+    so they are reported separately:
+
+      * engine ``pil``: Pillow places one glyph per code point.  Its FreeType
+        build has no HarfBuzz/Raqm, so it cannot reorder or reposition them,
+        and no font choice can help.
+      * a font with no GSUB/GPOS: libass *would* shape, but the face carries no
+        rules to shape with.  Iskoola Pota is the classic case -- pre-OpenType
+        Sinhala, laid out correctly only by Windows GDI/Uniscribe, never by
+        HarfBuzz -- and it is what the tool would otherwise auto-pick, because
+        its name matches the script perfectly.
+    """
+    if not needs_shaping(text):
+        return True, ""                       # Latin/CJK: nothing to shape
+    if engine != "ass":
+        return False, ("the Pillow engine places glyphs in code-point order, so "
+                       "vowel signs and conjuncts land in the wrong place. "
+                       + _advice(engine, font, text, allowed))
+    if font and not can_shape(font):
+        return False, (f"{os.path.basename(font)} has no OpenType layout tables "
+                       f"(GSUB/GPOS), so libass has nothing to shape with. "
+                       + _advice(engine, font, text, allowed))
+    return True, ""
+
+
 def resolve_engine(opts: Options, text: str, notes: list[str],
                    warnings: list[str]) -> str:
     if opts.engine != "auto":
@@ -102,9 +157,13 @@ def resolve_engine(opts: Options, text: str, notes: list[str],
             notes.append("engine: libass (this script needs text shaping; "
                          "Pillow alone would mis-place vowel signs)")
             return "ass"
-        warnings.append("this script needs text shaping but ffmpeg was not "
-                        "found; falling back to Pillow, which may mis-render "
-                        "combining marks. Install ffmpeg for correct output.")
+        if not opts.allow_unshaped:
+            raise UsageError(
+                "this script needs text shaping but ffmpeg was not found, and "
+                "Pillow cannot shape -- the subtitles would be mis-ordered. "
+                + _advice("pil", opts.font, text), 2)
+        warnings.append("rendering without a shaper because --allow-unshaped "
+                        "was given: combining marks may be misplaced")
         return "pil"
     return "pil"
 
@@ -404,9 +463,22 @@ def run(opts: Options, *, progress: Progress | None = None,
         raise UsageError(f"no usable cues found in {opts.srt}", 1)
     rep.cues = len(cues)
 
-    engine = resolve_engine(opts, "".join(ln for c in cues for ln in c.lines),
-                            notes, warnings)
+    body = "".join(ln for c in cues for ln in c.lines)
+    engine = resolve_engine(opts, body, notes, warnings)
     rep.engine = engine
+    font, _ = resolve_font(opts, body)
+    shaped, why = shaping_status(engine, font, body, opts.allow_unshaped)
+    rep.shaping = ("libass+harfbuzz" if shaped and engine == "ass"
+                   else ("n/a" if not needs_shaping(body) else "NONE"))
+    if not shaped:
+        if opts.allow_unshaped:
+            warnings.append(f"written WITHOUT text shaping: {why}")
+        else:
+            raise UsageError(f"this text needs text shaping, but it would not "
+                             f"be shaped: {why}", 2)
+    elif engine == "ass":
+        notes.append("shaping: libass + HarfBuzz with "
+                     + (os.path.basename(font) if font else "libass' own font scan"))
 
     if progress:
         progress("analyse", 0, 1, "")
@@ -582,6 +654,21 @@ def fonts_in(dirs: list[str]) -> list[dict]:
                     label = f"{fam[0]} {fam[1]}".strip()
                 except Exception:
                     pass
-                out.append(dict(path=path, name=name, label=label))
-    out.sort(key=lambda f: f["label"].lower())
+                out.append(dict(path=path, name=name, label=label,
+                                shaping=can_shape(path),
+                                scripts=sorted(set(script_hints(name)))))
+    out.sort(key=lambda f: (not f["shaping"], f["label"].lower()))
+    return out
+
+
+def script_hints(name: str) -> list[str]:
+    """Scripts this file name claims to cover -- a hint, not a guarantee."""
+    from .render import SCRIPT_FONT_HINTS, _norm
+    from .srt import _SCRIPTS
+    stem = _norm(name)
+    out = []
+    for script, _lo, _hi in _SCRIPTS:
+        if script.lower() in stem or any(
+                _norm(h) in stem for h in SCRIPT_FONT_HINTS.get(script, ())):
+            out.append(script)
     return out

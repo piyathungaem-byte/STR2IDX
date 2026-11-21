@@ -298,3 +298,114 @@ def test_family_name_lookup_reads_the_font(fake_windows, monkeypatch):
     assert calls                                    # the name table was read
     monkeypatch.setattr(R, "family_of", lambda p: None)
     assert R.font_by_name("Nothing Like It") is None
+
+
+# ------------------------------------------------- does the font shape at all?
+def fake_ttf(tags, collection=False):
+    """A byte string the table-directory parser accepts, with those tags."""
+    import struct
+    dir_ = struct.pack(">IHHHH", 0x00010000, len(tags), 0, 0, 0)
+    for t in tags:
+        dir_ += t.encode("latin1").ljust(4, b" ") + struct.pack(">III", 0, 0, 4)
+    if not collection:
+        return dir_
+    # tag(4) version(4) numFonts(4) offsets[](4) -> the first font starts at 16
+    return (b"ttcf" + struct.pack(">III", 0x00010000, 1, 16) + dir_)
+
+
+def test_layout_tables_are_read_without_a_font_library(tmp_path):
+    from srt2idx.render import can_shape, sfnt_tables
+    shaped = tmp_path / "with.ttf"
+    shaped.write_bytes(fake_ttf(["head", "GSUB", "glyf", "GPOS"]))
+    plain = tmp_path / "without.ttf"
+    plain.write_bytes(fake_ttf(["head", "glyf", "cmap", "name"]))     # Iskoola-like
+    aat = tmp_path / "aat.ttf"
+    aat.write_bytes(fake_ttf(["morx", "kerx", "glyf"]))
+    assert sfnt_tables(str(shaped)) == {"head", "GSUB", "glyf", "GPOS"}
+    assert can_shape(str(shaped)) and can_shape(str(aat))
+    assert not can_shape(str(plain))
+    assert not can_shape(str(tmp_path / "junk.ttf"))           # garbage bytes
+    (tmp_path / "junk.ttf").write_bytes(b"not a font at all")
+    assert not can_shape(None) and not can_shape(str(tmp_path / "nope.ttf"))
+
+
+def test_font_collection_is_followed(tmp_path):
+    from srt2idx.render import can_shape
+    ttc = tmp_path / "Nirmala.ttc"
+    ttc.write_bytes(fake_ttf(["GSUB", "glyf"], collection=True))
+    assert can_shape(str(ttc))
+
+
+def test_the_auto_pick_skips_a_face_carrying_no_rules(tmp_path):
+    """Both names match Sinhala; only one can shape.  Picking iskpota because
+    its name matches is what produces the mis-ordered text people blame the TV
+    for, so the layout tables decide."""
+    import srt2idx.render as R
+    d = tmp_path / "Fonts"
+    d.mkdir()
+    (d / "iskpota.ttf").write_bytes(fake_ttf(["glyf", "cmap"]))          # glyphs only
+    (d / "Nirmala.ttf").write_bytes(fake_ttf(["glyf", "GSUB", "GPOS"]))
+    R._font_cache.clear()
+    hits = R.script_fonts(["Sinhala"], [str(d)], need_layout=True)
+    assert [os.path.basename(x) for x in hits] == ["Nirmala.ttf"]
+    # without the requirement, the legacy face comes back (it is still a real
+    # Sinhala font -- just not one HarfBuzz can use)
+    R._font_cache.clear()
+    both = R.script_fonts(["Sinhala"], [str(d)], need_layout=False)
+    assert {os.path.basename(x) for x in both} == {"iskpota.ttf", "Nirmala.ttf"}
+    R._font_cache.clear()
+
+
+def test_only_legacy_faces_still_returns_one_with_a_warning(tmp_path):
+    """Refusing to render at all would be worse than rendering with the only
+    font available; the shaping check is what turns that into an error."""
+    import srt2idx.render as R
+    d = tmp_path / "Fonts"
+    d.mkdir()
+    (d / "iskpota.ttf").write_bytes(fake_ttf(["glyf"]))
+    R._font_cache.clear()
+    got, script = R.suggest_font("සුළු මොහොතක්", dirs=[str(d)])
+    assert script == "Sinhala" and got.endswith("iskpota.ttf")
+    R._font_cache.clear()
+
+
+def test_shaping_status_names_the_two_causes_and_the_fix():
+    from srt2idx.pipeline import shaping_status
+    si = "මගේ නම සුනිල්"
+    assert shaping_status("pil", None, "Hello TV") == (True, "")   # not needed
+    ok, why = shaping_status("pil", None, si)
+    assert not ok and "code-point order" in why and "--allow-unshaped" in why
+    ok, why = shaping_status("ass", None, si)
+    assert ok and why == ""                                        # libass decides
+    if HAS_FONT:
+        # DejaVu shapes Latin (it has GSUB) so the font test needs the stripped
+        # copy made by poc/shaping.py when present; skip otherwise
+        nogsub = "/tmp/nogsub.ttf"
+        if os.path.exists(nogsub):
+            import srt2idx.render as R
+            assert not R.can_shape(nogsub)
+            ok, why = shaping_status("ass", nogsub, si)
+            assert not ok and "OpenType layout tables" in why
+
+
+def test_ass_renderer_absolutises_fontsdir(tmp_path, monkeypatch):
+    """fontsdir is resolved against ffmpeg's cwd (the temp dir), so a relative
+    one silently points at nothing and libass draws .notdef boxes."""
+    ar = AssRenderer(RenderStyle(), (720, 576), "ffmpeg", fontsdir="poc/fonts")
+    assert os.path.isabs(ar.fontsdir), ar.fontsdir
+    assert ar.fontsdir.endswith("poc/fonts")
+    assert AssRenderer(RenderStyle(), (720, 576), "ffmpeg").fontsdir is None
+
+
+def test_fonts_in_reports_shaping_capability(tmp_path, monkeypatch):
+    """The web UI's font list must be able to flag Iskoola Pota."""
+    from srt2idx.pipeline import fonts_in
+    d = tmp_path / "Fonts"
+    d.mkdir()
+    (d / "iskpota.ttf").write_bytes(fake_ttf(["glyf", "cmap"]))
+    (d / "Nirmala.ttf").write_bytes(fake_ttf(["glyf", "GSUB"]))
+    got = fonts_in([str(d)])
+    assert [f["name"] for f in got] == ["Nirmala.ttf", "iskpota.ttf"]   # usable first
+    assert got[0]["shaping"] is True and got[1]["shaping"] is False
+    assert got[1]["scripts"] == ["Sinhala"]      # the name matched; the file cannot
+    assert all({"path", "name", "label", "shaping", "scripts"} <= set(f) for f in got)

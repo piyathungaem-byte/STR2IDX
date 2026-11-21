@@ -170,12 +170,54 @@ def test_auto_engine_picks_libass_for_shaped_scripts(tmp_path, srt):
     assert "0 problem(s)" in r.stdout
 
 
-def test_engine_pil_still_produces_a_valid_pair_for_the_same_text(tmp_path):
+SINHALA = ("1\n00:00:01,000 --> 00:00:04,000\n"
+           "\u0dc3\u0dd4\u0dbd\u0dd2 \u0db8\u0dd9\u0db1\u0dc3\n")
+
+
+def test_an_unshaped_render_is_refused_before_it_wastes_a_film(tmp_path):
+    """Pillow draws Sinhala in code-point order: real glyphs, wrong text.
+
+    Every byte-level check still passes on such a file, so the only moment we
+    can say "this will read wrong on your TV" is before writing it.
+    """
     si = tmp_path / "si.srt"
-    si.write_text("1\n00:00:01,000 --> 00:00:04,000\n"
-                  "\u0dc3\u0dd4\u0dbd\u0dd2 \u0db8\u0dd9\u0db1\u0dc3\n", encoding="utf-8")
+    si.write_text(SINHALA, encoding="utf-8")
+    r = run(tmp_path, si, "-o", tmp_path / "x.idx", "--engine", "pil",
+            expect=2)
+    assert "needs text shaping" in r.stderr
+    assert "--allow-unshaped" in r.stderr          # names the way out
+    assert not (tmp_path / "x.idx").exists()
+
+
+def test_allow_unshaped_writes_a_valid_pair_anyway(tmp_path):
+    """The override must still produce a conformant file: what it changes is
+    the text order, never the container."""
+    si = tmp_path / "si.srt"
+    si.write_text(SINHALA, encoding="utf-8")
     out = tmp_path / "pil.idx"
-    run(tmp_path, si, "-o", out, "--engine", "pil", "--verify")
+    r = run(tmp_path, si, "-o", out, "--engine", "pil", "--verify",
+            "--allow-unshaped")
+    # warnings go to stderr, so they survive a pipe of the report
+    assert "WITHOUT text shaping" in r.stderr
     subs = parse_sub(out.with_suffix(".sub").read_bytes())
     assert len(subs) == 1
     assert decode_spu(subs[0][1]).width > 0
+
+
+def test_latin_text_is_never_blocked(tmp_path):
+    en = tmp_path / "en.srt"
+    en.write_text("1\n00:00:01,000 --> 00:00:04,000\nHello TV\n",
+                  encoding="utf-8")
+    run(tmp_path, en, "-o", tmp_path / "en.idx", "--engine", "pil", "--verify")
+
+
+def test_list_fonts_needs_no_input_file(tmp_path):
+    """The one question worth asking before a conversion: can this font shape?"""
+    r = run(tmp_path, "--list-fonts")
+    assert "shape" in r.stdout and "path" in r.stdout
+    assert "--font" in r.stdout or "--list-fonts" in r.stdout
+
+
+def test_a_command_with_no_input_is_an_error_not_a_crash(tmp_path):
+    r = run(tmp_path, expect=2)
+    assert "srt" in r.stderr and "--list-fonts" in r.stderr
