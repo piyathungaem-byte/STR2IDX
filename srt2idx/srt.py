@@ -32,6 +32,27 @@ def _ms(h: str, m: str, s: str, frac: str) -> int:
     return ((int(h) * 60 + int(m)) * 60 + int(s)) * 1000 + int(f)
 
 
+#: Encodings tried for a subtitle file that is not UTF-8.  Windows-1252 is the
+#: single most common one in the wild for older .srt files (it is the default
+#: ANSI codepage for Western European Windows), and latin-1 accepts any byte so
+#: it never fails -- better a wrong accent than U+FFFD everywhere.
+FALLBACK_ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")
+
+
+def decode(raw: bytes) -> tuple[str, str | None]:
+    """-> (text, encoding) where encoding is None when it was plain UTF-8."""
+    try:
+        return raw.decode("utf-8"), None
+    except UnicodeDecodeError:
+        pass
+    for enc in FALLBACK_ENCODINGS:
+        try:
+            return raw.decode(enc), enc
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", "replace"), "utf-8 (invalid bytes replaced)"
+
+
 def clean_text(line: str) -> str:
     """Strip markup, decode entities, normalise spaces."""
     line = _TAG.sub("", line)
@@ -93,6 +114,43 @@ _COMPLEX_BLOCKS = (
     (0xA980, 0xA9DF),   # Javanese
     (0xFB1E, 0xFEFF),   # presentation forms
 )
+
+
+# Named ranges, so a font can be picked by name.  _COMPLEX_BLOCKS above is the
+# "must shape" test; this is the "which face has these glyphs" test.
+_SCRIPTS = (
+    ("Sinhala", 0x0D80, 0x0DFF),
+    ("Tamil", 0x0B80, 0x0BFF),
+    ("Telugu", 0x0C00, 0x0C7F),
+    ("Kannada", 0x0C80, 0x0CFF),
+    ("Malayalam", 0x0D00, 0x0D7F),
+    ("Devanagari", 0x0900, 0x097F),
+    ("Bengali", 0x0980, 0x09FF),
+    ("Gurmukhi", 0x0A00, 0x0A7F),
+    ("Gujarati", 0x0A80, 0x0AFF),
+    ("Oriya", 0x0B00, 0x0B7F),
+    ("Thai", 0x0E00, 0x0E7F),
+    ("Lao", 0x0E80, 0x0EFF),
+    ("Myanmar", 0x1000, 0x109F),
+    ("Khmer", 0x1780, 0x17FF),
+    ("Tibetan", 0x0F00, 0x0FFF),
+    ("Georgian", 0x10A0, 0x10FF),
+    ("Armenian", 0x0530, 0x058F),
+    ("Hebrew", 0x0590, 0x05FF),
+    ("Arabic", 0x0600, 0x06FF),
+)
+
+
+def scripts_in(text: str) -> list[str]:
+    """Script names present in *text*, first-seen order, no repeats."""
+    seen = []
+    for ch in text:
+        if ch.isspace() or ord(ch) < 0x80:
+            continue
+        for name, lo, hi in _SCRIPTS:
+            if lo <= ord(ch) <= hi and name not in seen:
+                seen.append(name)
+    return seen
 
 
 def needs_shaping(text: str) -> bool:

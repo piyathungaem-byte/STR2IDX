@@ -109,6 +109,42 @@ def resolve_engine(opts: Options, text: str, notes: list[str],
     return "pil"
 
 
+def resolve_font(opts: Options, text: str, notes: list[str] | None = None):
+    """-> (font path or None, directory libass should index).
+
+    The user's --font always wins.  Otherwise: a script the platform default
+    face cannot show is picked from what is actually installed, because the
+    default is platform-specific (there is no DejaVu on Windows, and its
+    Sinhala/Devanagari faces answer to "iskpota"/"Nirmala"), and libass in a
+    wheel-built ffmpeg often has no fontconfig at all -- then it can only use
+    the fontsdir it is told about, so a bare --engine ass would draw nothing.
+    """
+    from .render import suggest_font, system_font_dirs
+
+    font = opts.font
+    if font and not os.path.exists(font):
+        # a family name ("Nirmala UI") rather than a path: both engines are
+        # happier with a file, and the ass fontsdir must be a directory
+        from .render import font_by_name
+        hit = font_by_name(font)
+        if hit:
+            if notes is not None:
+                notes.append(f'font "{font}" resolved to {hit}')
+            font = hit
+    if not font:
+        guess, script = suggest_font(text)
+        if guess:
+            font = guess
+            if notes is not None:
+                from .ass import font_family
+                notes.append(f"font: {font_family(guess)} picked for {script} "
+                             f"({os.path.basename(guess)}; --font overrides)")
+    if font:
+        return font, os.path.dirname(os.path.abspath(font))
+    dirs = system_font_dirs()
+    return None, (dirs[0] if dirs else None)
+
+
 def timed(options: Options, cues, shift_ms: int, frame_ms: float):
     """Snap cue boundaries to the frame grid and rescue sub-minimum ones.
 
@@ -153,11 +189,14 @@ def encode_cue(renderer: Renderer, style: RenderStyle, cue_lines, start, end,
 
 
 def build_items(opts: Options, cues, engine: str, progress: Progress | None,
-                cancelled: Callable[[], bool] | None):
+                cancelled: Callable[[], bool] | None,
+                notes: list[str] | None = None):
     """-> (items, skipped, long_cues, oversized)"""
     canvas = PAL_SIZE if opts.size == "pal" else NTSC_SIZE
+    body = "".join(ln for c in cues for ln in c.lines)
+    font, fontsdir = resolve_font(opts, body, notes)
     style = RenderStyle(
-        font_path=opts.font,
+        font_path=font,
         font_size=opts.font_size,
         margin_x=opts.margin_x,
         margin_bottom=opts.margin_bottom,
@@ -178,7 +217,6 @@ def build_items(opts: Options, cues, engine: str, progress: Progress | None,
         from .ass import AssRenderer
         ff = ffmpeg_exe()
         assert ff, "resolve_engine() already checked"
-        fontsdir = os.path.dirname(os.path.abspath(opts.font)) if opts.font else None
         ar = AssRenderer(style, canvas, ff, fps=opts.fps, fontsdir=fontsdir,
                          extra_style=opts.force_style)
         if progress:
@@ -186,6 +224,8 @@ def build_items(opts: Options, cues, engine: str, progress: Progress | None,
         for i, res in enumerate(ar.render_all(cues)):
             if res:
                 prebaked[i] = res
+        if notes is not None:
+            notes.extend(ar.notes)
 
     items, skipped, long_cues, oversized = [], 0, 0, 0
     for k, (ci, cue, start, end) in enumerate(planned):
@@ -352,8 +392,14 @@ def run(opts: Options, *, progress: Progress | None = None,
 
     if progress:
         progress("read", 0, 1, opts.srt)
-    with open(opts.srt, "r", encoding="utf-8", errors="replace") as fh:
-        cues = parse(fh.read())
+    from .srt import decode
+    with open(opts.srt, "rb") as fh:
+        raw = fh.read()
+    text, enc = decode(raw)
+    if enc:
+        notes.append(f"read {opts.srt} as {enc} -- it is not valid UTF-8; "
+                     f"re-save as UTF-8 if any accents look wrong")
+    cues = parse(text)
     if not cues:
         raise UsageError(f"no usable cues found in {opts.srt}", 1)
     rep.cues = len(cues)
@@ -365,7 +411,7 @@ def run(opts: Options, *, progress: Progress | None = None,
     if progress:
         progress("analyse", 0, 1, "")
     canvas, style, renderer, items, skipped, long_cues, oversized = build_items(
-        opts, cues, engine, progress, cancelled)
+        opts, cues, engine, progress, cancelled, notes)
 
     rep.canvas = tuple(canvas)
     rep.encoded = len(items)
@@ -440,8 +486,9 @@ def sample_png(text: str, opts: Options) -> bytes:
     canvas = PAL_SIZE if opts.size == "pal" else NTSC_SIZE
     img = Image.new("RGB", canvas, (8, 8, 8))
 
+    font, fontsdir = resolve_font(opts, text)
     style = RenderStyle(
-        font_path=opts.font, font_size=opts.font_size, margin_x=opts.margin_x,
+        font_path=font, font_size=opts.font_size, margin_x=opts.margin_x,
         margin_bottom=opts.margin_bottom, max_lines=max(1, opts.max_lines),
         outline=max(0, opts.outline), shadow=max(0, opts.shadow),
         bold=opts.bold, line_spacing=opts.line_spacing,
@@ -455,7 +502,6 @@ def sample_png(text: str, opts: Options) -> bytes:
     if engine == "ass" and text.strip():
         from .ass import AssRenderer
         ff = ffmpeg_exe()
-        fontsdir = os.path.dirname(os.path.abspath(opts.font)) if opts.font else None
         ar = AssRenderer(style, canvas, ff, fps=opts.fps, fontsdir=fontsdir,
                          extra_style=opts.force_style)
         out = ar.render_all([Cue(0, 2000, text.split("\n") or [""])])

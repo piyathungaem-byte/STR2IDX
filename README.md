@@ -66,15 +66,86 @@ A 1500-cue PAL file converts in ~10 s (Pillow) / ~30 s (libass) and produces a
 
 ## Install
 
+Run the install from **the folder that contains `pyproject.toml`** (the repo
+root — *not* the `srt2idx/` subfolder inside it). Then everything below is run
+from that same folder.
+
 ```bash
+# Linux / macOS
 python3 -m venv .venv && . .venv/bin/activate
-pip install -e .              # needs Pillow
-pip install -e '.[ass]'       # + imageio-ffmpeg: libass rendering and .mkv muxing
+pip install -e .                # needs Pillow
+pip install -e '.[ass]'         # + imageio-ffmpeg: libass rendering and .mkv muxing
 ```
+
+```bat
+:: Windows (cmd.exe).  Use "py -3" or "python" -- there is no "python3".
+py -3 -m venv .venv && .venv\Scripts\activate
+pip install -e .
+pip install -e ".[ass]"
+```
+
+```powershell
+# Windows (PowerShell).  The quotes matter: [ass] is a glob otherwise.
+py -3 -m venv .venv ; .venv\Scripts\Activate.ps1
+pip install -e ".[ass]"
+```
+
+Notes for Windows:
+
+* activate is `.venv\Scripts\activate` — there is no `.venv/bin/`.
+* `python` and `py -3` exist; `python3` usually does not.
+* `pip install -e "<something>[extra]"` **needs the quotes** in PowerShell, or
+  the extra is eaten as a wildcard.
+* A venv is per-project and cannot be copied between machines; if you made one
+  elsewhere, make a new one here.
+* Sinhala, Tamil and Thai render through libass, which needs ffmpeg — install
+  `".[ass]"` (or put an `ffmpeg.exe` on `PATH`). Pillow alone cannot shape
+  those scripts, and the wheel here is built without Raqm.
 
 `ffmpeg` on `PATH` is used if present; otherwise the `imageio-ffmpeg` wheel's
 binary is used. Without any ffmpeg you still get `.idx`/`.sub` output — you
 just lose `--mkv` and `--engine ass`.
+
+You do **not** have to install anything to run the web UI: `python webapp.py`
+works from a plain checkout, because it puts its own folder on `sys.path`.
+`pip install -e .` is only needed for the `srt2idx` command.
+
+### If the install complains
+
+| message | cause |
+|---|---|
+| `'.[ass]' is not a valid editable requirement` / `does not appear to be a Python project` | you are in `srt2idx/` instead of the repo root — `cd ..`, or `pip install -e "..[ass]"` |
+| `can't open file '...\.venv\bin\activate'` | Windows uses `.venv\Scripts\activate` |
+| `'python3' is not recognized` | use `python` or `py -3` |
+| `pip is not recognized` after activating | activate again; the prompt must show `(.venv)` |
+| `engine 'ass' needs ffmpeg on PATH` | install `".[ass]"`, or add an ffmpeg build to `PATH` |
+| subtitles render as empty boxes | the chosen font lacks those glyphs — see *Fonts* below |
+
+### Fonts
+
+A font is picked automatically, in this order: `--font`, then `$SRT2IDX_FONT`,
+then an installed face whose name matches the script of your file (`Nirmala`,
+`iskpota` for Sinhala on Windows; `Noto*` anywhere), then the platform default.
+Windows has no DejaVu, which is why the search is by name rather than a fixed
+path. The chosen face is reported in the conversion notes, and the font
+directories scanned are `%WINDIR%\Fonts`, `%LOCALAPPDATA%\Microsoft\Windows\Fonts`,
+`/usr/share/fonts`, `/usr/local/share/fonts`, `/Library/Fonts`,
+`/System/Library/Fonts` and `~/.fonts`.
+
+If your script is not covered by any installed face, name one you have or drop
+a file in:
+
+* `--font "Nirmala UI"` — a *family name* is accepted and looked up for you
+  (file names first, then each font's own name table, so "Iskoola Pota" finds
+  `iskpota.ttf`);
+* `--font "C:\Users\you\Downloads\NotoSansSinhala.ttf"` — a path, any font
+  file, wherever it lives;
+* or upload the `.ttf` in the web UI's Fonts card and pick it from the list.
+
+A face without the right glyphs burns empty boxes into the bitmap — the file
+still validates perfectly and looks fine to every checker, so **look at a
+preview** before trusting a 2-hour film.
+
 
 ## Usage
 
@@ -124,6 +195,11 @@ render of your settings, and downloads.
 ```bash
 python3 webapp.py                      # http://127.0.0.1:8420
 python3 webapp.py --port 8080 --host 0.0.0.0 --max-upload-mb 8192
+```
+
+```bat
+:: Windows: "python", not "python3"
+python webapp.py
 ```
 
 What it does:

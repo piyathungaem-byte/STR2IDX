@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 from dataclasses import dataclass
 
 from PIL import Image, ImageDraw, ImageFont
@@ -26,15 +27,176 @@ NTSC_SIZE = (720, 480)
 MIN_FONT = 12            # below this a TV subtitle is unreadable anyway
 ALPHA_CUTOFF = 128       # FreeType coverage above which a pixel is "on"
 
+#: Faces that exist almost everywhere, tried before scanning whole trees.
 DEFAULT_FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-    "C:/Windows/Fonts/arialbd.ttf",
-    "C:/Windows/Fonts/arial.ttf",
+    "arialbd.ttf",            # Windows: resolved against %WINDIR%\\Fonts
+    "arial.ttf",
 ]
+
+FONT_EXTS = (".ttf", ".otf", ".ttc")
+
+#: Font file-name fragments that indicate coverage of a script.  Used only to
+#: *guess* which installed face to ask for; the user can always override with
+#: --font.  Windows is the reason this exists: there is no DejaVu, and the
+#: Sinhala/Devanagari faces live under names like iskpota.ttf / Nirmala.ttf.
+SCRIPT_FONT_HINTS = {
+    "Sinhala": ("sinhala", "lklug", "iskpota", "iskoola", "akur", "hapsar",
+                "gatambe", "nirmala", "nimbuslkl"),
+    "Tamil": ("tamil", "nirmala", "lakshman"),
+    "Telugu": ("telugu", "nirmala", "suravaram", "gautami"),
+    "Kannada": ("kannada", "nirmala", "pothana2"),
+    "Malayalam": ("malayalam", "nirmala", "manjari"),
+    "Devanagari": ("devanagari", "mangal", "nirmala", "nakula"),
+    "Bengali": ("bengali", "nirmala", "shonar"),
+    "Gurmukhi": ("gurmukhi", "raavi"),
+    "Gujarati": ("gujarati", "shruti"),
+    "Oriya": ("oriya", "utkal"),
+    "Thai": ("thai", "leelawadee"),
+    "Lao": ("lao",),
+    "Myanmar": ("myanmar", "myanmar3"),
+    "Khmer": ("khmer", "khmemui"),
+    "Tibetan": ("tibetan", "kailasa"),
+    "Hebrew": ("hebrew", "arialhb"),
+    "Arabic": ("arabic", "amil", "traditional"),
+}
+
+
+def system_font_dirs() -> tuple[str, ...]:
+    """Directories holding fonts on *this* machine, most specific first."""
+    out: list[str] = []
+    windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+    if windir:
+        out.append(os.path.join(windir, "Fonts"))
+    out.append("C:/Windows/Fonts")            # Wine/Cygwin and bare installs
+    local = os.environ.get("LOCALAPPDATA")
+    if local:                                 # per-user font installs (Win10+)
+        out.append(os.path.join(local, "Microsoft", "Windows", "Fonts"))
+    home = os.path.expanduser("~")
+    out.append(os.path.join(home, ".fonts"))
+    out.append(os.path.join(home, ".local", "share", "fonts"))
+    out += ["/usr/share/fonts", "/usr/local/share/fonts",
+            "/Library/Fonts", os.path.join(home, "Library", "Fonts"),
+            "/System/Library/Fonts",
+            "/System/Library/Fonts/Supplemental",
+            os.path.join(os.environ.get("PROGRAMFILES", ""), "Microsoft",
+                         "Shared", "Fonts")]
+    seen, dirs = set(), []
+    for d in out:
+        d = d.strip()
+        if d and d not in seen and os.path.isdir(d):
+            seen.add(d)
+            dirs.append(d)
+    return tuple(dirs)
+
+
+def _norm(name: str) -> str:
+    return os.path.splitext(name)[0].lower().replace("-", "").replace(
+        "_", "").replace(" ", "").replace("(", "").replace(")", "")
+
+
+_font_cache: dict = {}
+
+
+def script_fonts(scripts, dirs=None) -> list[str]:
+    """Installed font files whose *name* mentions one of these scripts."""
+    dirs = tuple(dirs or system_font_dirs())
+    key = (tuple(scripts), dirs)
+    if key in _font_cache:
+        return _font_cache[key]
+    want = []
+    for sc in scripts:
+        want += [sc] + list(SCRIPT_FONT_HINTS.get(sc, ()))
+    want = {_norm(w) for w in want}
+    found: list[str] = []
+    for d in dirs:
+        for root, _sub, files in os.walk(d):
+            for name in sorted(files):
+                if not name.lower().endswith(FONT_EXTS):
+                    continue
+                stem = _norm(name)
+                if any(w in stem for w in want):
+                    found.append(os.path.join(root, name))
+    # Prefer the free, well-maintained Unicode fonts when several faces match:
+    # Noto and the vendor fallbacks both cover the script, but Noto's shaping
+    # tables are the ones that have been tested against libass.
+    def rank(path):
+        stem = _norm(os.path.basename(path))
+        pref = ("noto", "freesans", "sarala", "samyak", "harmony")
+        return (0 if any(k in stem for k in pref) else 1, stem, path)
+    found.sort(key=rank)
+    _font_cache[key] = found
+    return found
+
+
+def _tokens(text: str) -> frozenset:
+    return frozenset(w for w in re.split(r"[^a-z0-9]+", text.lower()) if w)
+
+
+_family_cache: dict = {}
+
+
+def family_of(path: str) -> str | None:
+    """The family name inside a font file, e.g. "Iskoola Pota"."""
+    if path in _family_cache:
+        return _family_cache[path]
+    try:
+        from PIL import ImageFont
+        fam = ImageFont.truetype(path, 12).getname()[0] or None
+    except Exception:
+        fam = None
+    _family_cache[path] = fam
+    return fam
+
+
+def font_by_name(spec: str, dirs=None) -> str | None:
+    """Resolve a font *family or file name* to a file on this machine.
+
+    Windows users say "Nirmala UI", not "C:\\Windows\\Fonts\\Nirmala.ttf", and
+    the real Sinhala face is called "Iskoola Pota" while its file is
+    iskpota.ttf -- so file names are tried first (cheap), then the family name
+    read out of each font.  Matching is by token set, so "Nirmala-UI",
+    "nirmala ui" and "Nirmala.ttf" all hit Nirmala.ttf.
+    """
+    want = _tokens(os.path.basename(spec))
+    if not want:
+        return None
+    fonts = []
+    for d in (dirs or system_font_dirs()):
+        for root, _sub, files in os.walk(d):
+            fonts += [os.path.join(root, n) for n in sorted(files)
+                      if n.lower().endswith(FONT_EXTS)]
+    partial = None
+    for path in fonts:
+        tok = _tokens(os.path.splitext(os.path.basename(path))[0])
+        if tok == want:
+            return path                                   # name says it exactly
+        if tok and (tok <= want or want <= tok):
+            partial = partial or path
+    for path in fonts:                                   # ask the font itself
+        fam = _tokens(family_of(path) or "")
+        if fam and (fam == want or fam <= want or want <= fam):
+            return path
+    return partial
+
+
+def suggest_font(text: str, dirs=None) -> tuple[str | None, str | None]:
+    """-> (font path or None, script it was matched for).
+
+    Only consulted when the user did not pass --font: a Latin-only default face
+    renders Sinhala as empty boxes, and on Windows the face that covers it is
+    not the one a Linux machine would pick.
+    """
+    from .srt import scripts_in
+    for sc in scripts_in(text):
+        hits = script_fonts([sc], dirs)
+        if hits:
+            return hits[0], sc
+    return None, None
 
 
 @dataclass
@@ -52,22 +214,37 @@ class RenderStyle:
 
 
 def find_font(style: RenderStyle) -> str:
+    """A face to draw with when the caller did not name one."""
     if style.font_path:
-        if not os.path.exists(style.font_path):
-            raise FileNotFoundError(f"font not found: {style.font_path}")
-        return style.font_path
+        for cand in (style.font_path, os.path.normpath(style.font_path)):
+            if os.path.exists(cand):
+                return cand
+        # a family name instead of a path is how Windows describes its fonts
+        hit = font_by_name(style.font_path)
+        if hit:
+            return hit
+        raise FileNotFoundError(
+            f"font not found: {style.font_path} -- pass a .ttf/.otf path, or a "
+            f"family name that exists in {', '.join(system_font_dirs())}")
 
     env = os.environ.get("SRT2IDX_FONT")
     if env and os.path.exists(env):
         return env
 
+    fontdirs = system_font_dirs()
     for cand in DEFAULT_FONT_CANDIDATES:
-        if os.path.exists(cand):
-            return cand
+        # bare names like "arialbd.ttf" are Windows font-dir residents
+        for base in (os.path.curdir, *fontdirs):
+            full = cand if os.path.isabs(cand) else os.path.join(base, cand)
+            if os.path.exists(full):
+                return full
 
-    found = sorted(glob.glob("/usr/share/fonts/**/*.ttf", recursive=True))
-    if found:
-        return found[0]
+    for d in fontdirs:
+        found = sorted(p for pat in ("*.ttf", "*.otf")
+                       for p in glob.glob(os.path.join(d, "**", pat),
+                                          recursive=True))
+        if found:
+            return found[0]
     raise FileNotFoundError(
         "No TrueType font found. Pass --font /path/to/font.ttf "
         "or set SRT2IDX_FONT."

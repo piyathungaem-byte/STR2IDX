@@ -4,6 +4,9 @@
     python3 webapp.py                       # http://127.0.0.1:8420
     python3 webapp.py --port 8080 --host 0.0.0.0
 
+    Windows (cmd.exe / PowerShell) -- "python", not "python3":
+    python webapp.py
+
 The form is *generated* from ``srt2idx.settings.FIELDS`` -- the same table that
 builds the command line flags -- so the UI can never fall behind the CLI: add a
 setting there and it appears here, in ``srt2idx --help`` and in the command
@@ -38,19 +41,15 @@ from urllib.parse import parse_qs, quote, urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from srt2idx import pipeline, settings
+from srt2idx.render import system_font_dirs
 from srt2idx.pipeline import Cancelled, UsageError
 from srt2idx.settings import Options
 
 APP = "srt2idx"
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FONT_DIRS = (
-    os.path.expanduser("~/.local/share/fonts"),
-    os.path.expanduser("~/.fonts"),
-    "/usr/share/fonts",
-    "/usr/local/share/fonts",
-    "/System/Library/Fonts",
-    "C:/Windows/Fonts",
-)
+# one source of truth with the renderer, so the picker offers what find_font
+# would find on this OS (on Windows that means %WINDIR%\Fonts)
+DEFAULT_FONT_DIRS = system_font_dirs()
 BADCHAR = re.compile(r"[/\\\x00-\x1f]")
 SAFE = re.compile(r"[^A-Za-z0-9._ \u0080-\uFFFF-]")
 
