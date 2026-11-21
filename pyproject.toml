@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "srt2idx"
+version = "0.1.0"
+description = "Convert .srt subtitles into VobSub .idx + .sub for TVs that only play bitmap subtitles"
+readme = "README.md"
+requires-python = ">=3.9"
+keywords = ["subtitles", "srt", "vobsub", "idx", "sub", "dvd", "mkv", "tv"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = [
+    "Pillow>=9.0",
+]
+
+[project.optional-dependencies]
+# Renders through libass (needed for Sinhala/Arabic/Devanagari/Thai...) and
+# muxes the result into .mkv. Any ffmpeg build works; this one just supplies
+# the binary when the system has none.
+ass = ["imageio-ffmpeg>=0.5"]
+dev = ["pytest>=7", "imageio-ffmpeg>=0.5"]
+
+[project.scripts]
+srt2idx = "srt2idx.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["srt2idx*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
