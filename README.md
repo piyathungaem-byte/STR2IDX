@@ -147,6 +147,51 @@ still validates perfectly and looks fine to every checker, so **look at a
 preview** before trusting a 2-hour film.
 
 
+### Sinhala, Thai, Arabic: when the glyphs look right but read wrong
+
+If the marks sit *beside* the consonant instead of above or before it — a small
+detached circle where `ේ` should be — the text was drawn **one glyph per code
+point**, with no shaper in the loop. The glyphs are fine; only the placement is
+wrong, which is why it looks "almost right" and why a font swap appears to do
+nothing. Two causes, opposite fixes:
+
+| cause | what to do |
+|---|---|
+| the **Pillow** engine was used (no ffmpeg, or `--engine pil`) | use `--engine ass`. Pillow's FreeType has no HarfBuzz/Raqm, so *no font* will ever shape correctly with it. |
+| the **font** has no `GSUB`/`GPOS` tables | libass is shaping, but the face carries no rules. **Iskoola Pota is this case** — a pre-OpenType Sinhala font, correct only under Windows GDI/Uniscribe. Use `Nirmala UI`, or Noto Sans Sinhala. Clearing the font box is usually enough: the picker then skips faces without layout tables. |
+
+`srt2idx` refuses to write such a file rather than let you discover it on the TV,
+because every byte-level check passes on mis-ordered text:
+
+```
+error: this text needs text shaping, but it would not be shaped: IskoolaPota.ttf
+has no OpenType layout tables (GSUB/GPOS), so libass has nothing to shape with.
+clear the font setting to use Nirmala.ttf; --allow-unshaped writes the file anyway
+```
+
+Check what you have before converting a film — this lists every installed face,
+whether it can shape, and which scripts its name suggests:
+
+```bash
+srt2idx --list-fonts          # or: python -m srt2idx --list-fonts
+```
+
+```
+  shape  script    family              path
+  yes    -         Arial               C:\Windows\Fonts\arial.ttf
+  yes    Sinhala   Nirmala UI          C:\Windows\Fonts\Nirmala.ttf
+  NO     Sinhala   Iskoola Pota        C:\Windows\Fonts\iskpota.ttf
+```
+
+That `NO` row is the trap: the same script in the name, and nothing to say it
+is unusable unless something checks. The web UI's font list marks it the same
+way.
+
+The conversion report prints `shaping: libass + HarfBuzz with <font>`, the web UI
+has a green/red **shaping** row and says it in the live preview's warning, and
+`--allow-unshaped` overrides everything if you need a file today and accept the
+placement.
+
 ## Usage
 
 ```bash
@@ -172,7 +217,7 @@ srt2idx movie.srt --verify --preview
 Useful flags: `--fps` (snap to frames, default 25), `--min-duration` (rescue
 flickering sub-second cues), `--max-lines`, `--margin-bottom`, `--shadow`,
 `--size pal|ntsc`, `--lang`, `--title`, `--force-style` (raw libass overrides),
-`--engine pil|ass|auto`.
+`--engine pil|ass|auto`, `--allow-unshaped`.
 
 ## Getting it onto the TV
 

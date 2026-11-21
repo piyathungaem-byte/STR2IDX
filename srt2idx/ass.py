@@ -126,7 +126,11 @@ class AssRenderer:
         self.canvas = canvas
         self.ff = ffmpeg_exe
         self.fps = fps
-        self.fontsdir = fontsdir
+        # MUST stay absolute: ffmpeg is spawned with cwd=<temp dir>, so a
+        # relative fontsdir would point at that temp dir and libass would find
+        # no fonts at all -- the cue renders as a row of .notdef boxes that
+        # every byte-level check still calls valid.
+        self.fontsdir = os.path.abspath(fontsdir) if fontsdir else None
         self.extra_style = extra_style
         self.notes: list[str] = []      # things the caller should mention
 

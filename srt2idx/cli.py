@@ -27,16 +27,58 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Every setting here also drives the web UI: run "
                "`python webapp.py` and the same options appear as a form.",
     )
-    p.add_argument("srt", help="input SubRip .srt file")
+    p.add_argument("srt", nargs="?", help="input SubRip .srt file")
+    p.add_argument("--list-fonts", action="store_true",
+                   help="list the fonts on this machine and whether each one "
+                        "can shape Sinhala/Thai/Arabic (needs OpenType "
+                        "GSUB/GPOS), then exit")
     settings.add_to_parser(p)
     p.add_argument("--version", action="version", version=f"srt2idx {__version__}")
     return p
+
+
+def list_fonts() -> int:
+    """What to type into --font, and which tempting choices are traps."""
+    from .pipeline import ffmpeg_exe, fonts_in
+    from .render import system_font_dirs
+    fonts = fonts_in(list(system_font_dirs()))
+    print(f"{len(fonts)} font file(s) in {', '.join(system_font_dirs())}")
+    if not fonts:
+        print("  none found -- pass --font /path/to/file.ttf")
+        return 1
+    rows = [("yes" if f["shaping"] else "NO ",
+             ", ".join(f["scripts"]) or "-",
+             f["label"], f["path"]) for f in fonts]
+    sw = max([len(r[1]) for r in rows] + [6])
+    lw = max([len(r[2]) for r in rows] + [6])
+    print("")
+    print(f"  {'shape':4}  {'script':<{sw}}  {'family':<{lw}}  path")
+    for mark, scripts, label, path in rows:
+        print(f"  {mark:4}  {scripts:<{sw}}  {label:<{lw}}  {path}")
+    if not ffmpeg_exe():
+        print("\nno ffmpeg found: even a shaping font cannot be used, because "
+              "the Pillow engine has no shaper. Install it with "
+              'pip install ".[ass]".')
+    cap = [f for f in fonts if f["shaping"] and f["scripts"]]
+    print()
+    if cap:
+        print("use one of the 'yes' rows, e.g.")
+        print(f"  --font {cap[0]['path']!r}")
+    else:
+        print("no installed font both shapes and matches a complex script: "
+              "install Noto Sans Sinhala (or use Nirmala UI on Windows), then "
+              "pass it with --font")
+    return 0
 
 
 def main(argv=None) -> int:
     parser = build_parser()
     try:
         ns = parser.parse_args(argv)
+        if getattr(ns, "list_fonts", False):
+            return list_fonts()
+        if not ns.srt:
+            parser.error("the 'srt' argument is required (or use --list-fonts)")
         opts = settings.from_args(ns)
     except UsageError as e:
         print(f"error: {e}", file=sys.stderr)

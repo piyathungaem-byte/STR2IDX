@@ -250,7 +250,8 @@ def run_one(job: Job, srt_name: str, template: dict, video: str | None,
         state="error" if rep.verify_problems else "done",
         cues=rep.cues, encoded=rep.encoded, skipped=rep.skipped,
         long_cues=rep.long_cues, oversized=rep.oversized,
-        engine=rep.engine, canvas=list(rep.canvas), size=opts.size,
+        engine=rep.engine, shaping=rep.shaping,
+        canvas=list(rep.canvas), size=opts.size,
         idx=os.path.basename(rep.idx_path) if rep.idx_path else None,
         sub=os.path.basename(rep.sub_path) if rep.sub_path else None,
         idx_size=rep.idx_size, sub_size=rep.sub_size,
@@ -479,7 +480,13 @@ def api_files() -> dict:
         if not kind:
             continue
         st = os.stat(p)
-        out[kind].append(dict(name=name, bytes=st.st_size, mtime=int(st.st_mtime)))
+        rec = dict(name=name, bytes=st.st_size, mtime=int(st.st_mtime))
+        if kind == "font":
+            # an uploaded font is the user's own attempt to fix garbled
+            # text; say at once if it cannot shape (Iskoola Pota, for one)
+            rec["shaping"] = pipeline.can_shape(p)
+            rec["label"] = name
+        out[kind].append(rec)
     return out
 
 
@@ -510,15 +517,31 @@ def api_command(payload: dict) -> dict:
 
 
 def api_sample(payload: dict) -> tuple[bytes, str]:
+    """Render one cue with the current settings, and say whether it was shaped.
+
+    The warning matters more than the picture: unshaped Sinhala looks *almost*
+    right -- real glyphs, plausible font, marks one space to the right -- so a
+    preview that stays silent is how a whole film gets burned wrong.
+    """
     text = str(payload.get("text") or "")[:400]
     opts, _ = _split_options(payload.get("options") or {})
     o = Options.from_dict(opts)
     o.verify = o.preview = o.dry_run = False
     o.mkv = False
     warning = ""
-    if o.engine == "ass" and not pipeline.ffmpeg_exe():
+    try:
+        engine = pipeline.resolve_engine(o, text, [], [])
+    except UsageError as e:
+        # a preview should still show *why*: render it the only way we can
         o.engine = "pil"
-        warning = "libass unavailable -- rendered with Pillow"
+        engine = "pil"
+        warning = str(e)
+    if not warning:
+        o.engine = engine
+        font, _ = pipeline.resolve_font(o, text)
+        shaped, why = pipeline.shaping_status(engine, font, text)
+        if not shaped:
+            warning = f"NOT SHAPED: {why}"
     return pipeline.sample_png(text, o), warning
 
 
@@ -1230,12 +1253,17 @@ async function refreshFiles() {
   const sel = $('#ctl-font');
   if (sel) {
     const want = VALUES.font || '';
-    sel.innerHTML = '<option value="">(default: DejaVu Sans)</option>';
+    sel.innerHTML = '<option value="">(auto: a face that shapes this script)</option>';
     const seen = new Set();
     for (const f of FILES.font.concat(CFG.fonts)) {
       if (seen.has(f.path)) continue;
       seen.add(f.path);
-      sel.appendChild(new Option((f.label || f.name) + (inUploads(f) ? '  \\u2191' : ''), f.path));
+      const bad = f.shaping === false
+        ? '  \u26a0 no OpenType tables: cannot shape Sinhala/Thai/Arabic'
+        : (f.scripts && f.scripts.length
+            ? '  \u00b7 ' + f.scripts.slice(0, 3).join(', ') : '');
+      sel.appendChild(new Option((f.label || f.name)
+        + (inUploads(f) ? '  \u2191' : '') + bad, f.path));
     }
     sel.value = [...sel.options].some(o => o.value === want) ? want : '';
     VALUES.font = sel.value || null;
@@ -1387,11 +1415,20 @@ function renderResult(j) {
       rows.push(['fit', (it.long_cues ? it.long_cues + ' shrank the font' : 'all cues fit ' + ((it.options || {}).max_lines || 2) + ' lines')
         + (it.oversized ? ' \\u00b7 ' + it.oversized + ' over 64 KiB' : '')]);
       rows.push(['canvas', it.canvas[0] + '\\u00d7' + it.canvas[1] + ' \\u00b7 ' + (it.size || '')]);
-      rows.push(['engine', it.engine === 'ass' ? 'libass (shaped)' : 'Pillow']);
+      rows.push(['engine', it.engine === 'ass' ? 'libass' : 'Pillow']);
+      rows.push(['shaping', { 'libass+harfbuzz': '\u2713 shaped by HarfBuzz',
+                              'NONE': '\u2717 NOT SHAPED \u2014 marks misplaced'
+                            }[it.shaping] || 'not needed for this script']);
       rows.push(['files', it.idx + ' ' + it.idx_size + ' B \\u00b7 ' + it.sub + ' ' + it.sub_size + ' B']);
       rows.push(['time', it.elapsed + 's']);
     }
-    for (const [k, v] of rows) { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, String(v))); }
+    for (const [k, v] of rows) {
+      const dd = el('dd', null, String(v));
+      if (k === 'shaping') dd.style.color =
+        String(v).indexOf('\u2717') === 0 ? 'var(--bad)'
+        : String(v).indexOf('\u2713') === 0 ? 'var(--good)' : '';
+      dl.appendChild(el('dt', null, k)); dl.appendChild(dd);
+    }
     if (!it.dry_run) {
       const dt = el('dt', null, 'check');
       const dd = el('dd', null, it.problems.length ? '\\u2717 ' + it.problems.length + ' problem(s)' : '\\u2713 decoded back identical');

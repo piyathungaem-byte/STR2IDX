@@ -113,6 +113,12 @@ FIELDS: tuple[Field, ...] = (
     _f("font", "--font", "script", "path", None,
        "TTF/OTF face to render with. Missing glyphs are burned into the bitmap "
        "as .notdef boxes, so check a preview.", ui="file"),
+    _f("allow_unshaped", "--allow-unshaped", "script", "bool", False,
+       "Write the file even when the script needs text shaping and this render "
+       "cannot provide it (no ffmpeg, or a font without OpenType layout "
+       "tables). Vowel signs will land in the wrong place -- Sinhala, Thai and "
+       "Arabic look broken on screen. Fix the cause instead: install ffmpeg "
+       '(pip install ".[ass]") or pick a shaping-capable font.',),
     _f("force_style", "--force-style", "script", "text", None,
        "Extra raw libass overrides for the ass engine, e.g. "
        "'Spacing=2,BorderStyle=1,MarginB=10'. Anything valid in an ASS "
@@ -250,6 +256,7 @@ class Options:
     engine: str = "auto"
     font: str | None = None
     force_style: str | None = None
+    allow_unshaped: bool = False
     lang: str = "eng"
     title: str | None = None
     # job-level

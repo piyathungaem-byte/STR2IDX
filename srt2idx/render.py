@@ -66,6 +66,52 @@ SCRIPT_FONT_HINTS = {
 }
 
 
+#: OpenType/Apple tables that carry substitution and positioning rules.  A font
+#: without them has the *glyphs* but no idea how to place them: it is drawn
+#: code point by code point, so Sinhala/Thai/Arabic vowel signs end up floating
+#: next to the consonant instead of above or before it.
+LAYOUT_TABLES = ("GSUB", "GPOS", "morx", "kerx")
+
+
+def sfnt_tables(path: str) -> frozenset[str]:
+    """The table tags inside a font file, without any font library.
+
+    Cheap on purpose (a struct unpack of the table directory) because it runs
+    for every candidate face during font selection.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+            if head[:4] == b"ttcf":                       # font collection
+                n = int.from_bytes(head[8:12], "big")
+                if not n:
+                    return frozenset()
+                off = int.from_bytes(head[12:16], "big")
+                fh.seek(off)
+                base = fh.read(12)
+            else:
+                base, off = head[:12], 0
+            if len(base) < 12 or base[:4] not in (b"\x00\x01\x00\x00", b"OTTO",
+                                                  b"true", b"typ1"):
+                return frozenset()
+            n = int.from_bytes(base[4:6], "big")
+            if n > 512:
+                return frozenset()            # absurd count: treat as unreadable
+            fh.seek(off + 12)
+            rows = fh.read(16 * n)
+            return frozenset(rows[i * 16:i * 16 + 4].decode("latin1")
+                             for i in range(n) if len(rows) >= (i + 1) * 16)
+    except OSError:
+        return frozenset()
+
+
+def can_shape(path: str | None) -> bool:
+    """True if this face can shape complex scripts (has GSUB/GPOS or AAT)."""
+    if not path:
+        return False
+    return bool(sfnt_tables(path) & set(LAYOUT_TABLES))
+
+
 def system_font_dirs() -> tuple[str, ...]:
     """Directories holding fonts on *this* machine, most specific first."""
     out: list[str] = []
@@ -102,10 +148,15 @@ def _norm(name: str) -> str:
 _font_cache: dict = {}
 
 
-def script_fonts(scripts, dirs=None) -> list[str]:
-    """Installed font files whose *name* mentions one of these scripts."""
+def script_fonts(scripts, dirs=None, need_layout: bool = False) -> list[str]:
+    """Installed font files whose *name* mentions one of these scripts.
+
+    need_layout drops faces that only carry glyphs -- on Windows that means
+    Iskoola Pota (pre-OpenType Sinhala, correct only under GDI/Uniscribe), which
+    otherwise looks like a perfect match and then renders mis-ordered text.
+    """
     dirs = tuple(dirs or system_font_dirs())
-    key = (tuple(scripts), dirs)
+    key = (tuple(scripts), dirs, need_layout)
     if key in _font_cache:
         return _font_cache[key]
     want = []
@@ -113,6 +164,7 @@ def script_fonts(scripts, dirs=None) -> list[str]:
         want += [sc] + list(SCRIPT_FONT_HINTS.get(sc, ()))
     want = {_norm(w) for w in want}
     found: list[str] = []
+    _skipped: list[str] = []
     for d in dirs:
         for root, _sub, files in os.walk(d):
             for name in sorted(files):
@@ -120,7 +172,11 @@ def script_fonts(scripts, dirs=None) -> list[str]:
                     continue
                 stem = _norm(name)
                 if any(w in stem for w in want):
-                    found.append(os.path.join(root, name))
+                    full = os.path.join(root, name)
+                    if need_layout and not can_shape(full):
+                        _skipped.append(full)
+                        continue
+                    found.append(full)
     # Prefer the free, well-maintained Unicode fonts when several faces match:
     # Noto and the vendor fallbacks both cover the script, but Noto's shaping
     # tables are the ones that have been tested against libass.
@@ -129,6 +185,10 @@ def script_fonts(scripts, dirs=None) -> list[str]:
         pref = ("noto", "freesans", "sarala", "samyak", "harmony")
         return (0 if any(k in stem for k in pref) else 1, stem, path)
     found.sort(key=rank)
+    if not found and _skipped and need_layout:
+        # nothing capable installed: report the fallback so the caller can say
+        # *why* the result will look wrong
+        found = _skipped[:1]
     _font_cache[key] = found
     return found
 
@@ -184,7 +244,8 @@ def font_by_name(spec: str, dirs=None) -> str | None:
     return partial
 
 
-def suggest_font(text: str, dirs=None) -> tuple[str | None, str | None]:
+def suggest_font(text: str, dirs=None,
+                 need_layout: bool = True) -> tuple[str | None, str | None]:
     """-> (font path or None, script it was matched for).
 
     Only consulted when the user did not pass --font: a Latin-only default face
@@ -193,7 +254,7 @@ def suggest_font(text: str, dirs=None) -> tuple[str | None, str | None]:
     """
     from .srt import scripts_in
     for sc in scripts_in(text):
-        hits = script_fonts([sc], dirs)
+        hits = script_fonts([sc], dirs, need_layout=need_layout)
         if hits:
             return hits[0], sc
     return None, None
